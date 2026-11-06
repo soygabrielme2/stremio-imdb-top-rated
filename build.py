@@ -228,7 +228,8 @@ def meta(m: dict) -> dict:
         # Plot first, like Stremio's own catalogs; the scores line stays at the end.
         "description": f"{m['plot']}\n\n{scores}" if m.get("plot") else scores,
     }
-    if m.get("min"):
+    if m.get("min") and m["type"] == "movie":
+        # For series MDBList reports the whole run's length (e.g. 3165 min), not an episode's.
         item["runtime"] = f"{m['min']} min"
     if m.get("yt"):
         # Must not also set "links": Stremio only builds the Genre/IMDb links when it's absent.
