@@ -14,8 +14,11 @@ The last three need Letterboxd and Metacritic ratings, which come from the
 [MDBList](https://mdblist.com) API and are cached in `ratings/mdblist.json`. They only appear
 once the `MDBLIST_API_KEY` repository secret is set (see below).
 
-In Stremio's **Discover** tab, both can be filtered by **Genre** and **Year** (a single year
+In Stremio's **Discover** tab, every row can be filtered by **Genre** and **Year** (a single year
 like 2024, or a decade like 1990s), alone or together, e.g. History + 2024.
+
+Stremio's phone/tablet app only shows one filter dropdown, so each row also has a Discover-only
+**"· by Year"** version whose dropdown lists years and decades instead of genres.
 
 Movies are ranked by a weighted rating like IMDb's own Top 250: titles with few votes are
 pulled toward the average so a 9.8 from 5,000 votes can't outrank a 9.3 from 3 million.

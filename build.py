@@ -94,10 +94,11 @@ CATALOGS = [
     },
 ]
 MIN_CATALOG_ITEMS = 50       # don't publish a ratings-based row until it has this many movies
+BY_YEAR_SUFFIX = "-by-year"  # Discover-only twin of each catalog for Stremio's mobile apps
 
 MANIFEST = {
     "id": "personal.imdb.top-rated",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "name": "IMDb Top Rated",
     "description": "Movies ranked by IMDb, Letterboxd and critics, filterable by genre and year, "
                    "rebuilt daily. Streams come from your other addons.",
@@ -325,6 +326,7 @@ def build(movies: list[dict], out: Path, base_url: str | None) -> None:
     shutil.rmtree(tmp, ignore_errors=True)
     folder = tmp / "catalog" / "movie"
     manifest = dict(MANIFEST, catalogs=[])
+    by_year: list[dict] = []
     files = 0
 
     for cat in CATALOGS:
@@ -349,6 +351,8 @@ def build(movies: list[dict], out: Path, base_url: str | None) -> None:
         for y in years:
             in_year = [m for m in pool if year_matches(m["year"], y)]
             files += write_list(folder, cat["id"], in_year, {"year": y})
+            # Same list for the "by Year" twin, whose single dropdown carries the year.
+            files += write_list(folder, cat["id"] + BY_YEAR_SUFFIX, in_year, {"genre": y})
             for g in genres:
                 both = [m for m in by_genre[g] if year_matches(m["year"], y)]
                 files += write_list(folder, cat["id"], both, {"genre": g, "year": y})
@@ -363,10 +367,23 @@ def build(movies: list[dict], out: Path, base_url: str | None) -> None:
                 {"name": "skip"},
             ],
         })
+        # Stremio's phone/tablet app shows only one filter dropdown (the genre one), so each
+        # catalog gets a Discover-only twin whose "genre" dropdown lists years and decades,
+        # like Cinemeta's own by-year catalog. isRequired keeps it off the Home board.
+        by_year.append({
+            "type": "movie",
+            "id": cat["id"] + BY_YEAR_SUFFIX,
+            "name": f"{cat['name']} · by Year",
+            "extra": [
+                {"name": "genre", "options": years, "isRequired": True},
+                {"name": "skip"},
+            ],
+        })
         top = row[0] if row else None
         log(f"  {cat['name']}: {len(row)} in row, {len(pool)} total, {len(genres)} genres, "
             f"{len(years)} year options" + (f", #1 = {top['name']} ({top['year']})" if top else ""))
 
+    manifest["catalogs"] += by_year
     write_json(tmp / "manifest.json", manifest)
     (tmp / ".nojekyll").write_text("", encoding="utf-8")
     url = (base_url.rstrip("/") + "/manifest.json") if base_url else "manifest.json"
