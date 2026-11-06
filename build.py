@@ -29,6 +29,8 @@ MAX_AGE_HOURS = 20          # IMDb refreshes the files daily
 PAGE_SIZE = 100             # Stremio asks for the next page with skip=<items so far>
 MIN_GENRE_ITEMS = 20        # hide genres too small to be worth a filter option
 POSTER = "https://images.metahub.space/poster/medium/{}/img"
+LOGO = "https://images.metahub.space/logo/medium/{}/img"
+BACKGROUND = "https://images.metahub.space/background/medium/{}/img"
 
 # Each catalog becomes one row on the Stremio board, filterable by genre and year in Discover.
 #   kind:         how the catalog ranks movies (see POOLS)
@@ -98,7 +100,7 @@ BY_YEAR_SUFFIX = "-by-year"  # Discover-only twin of each catalog for Stremio's 
 
 MANIFEST = {
     "id": "personal.imdb.top-rated",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "name": "IMDb Top Rated",
     "description": "Movies ranked by IMDb, Letterboxd and critics, filterable by genre and year, "
                    "rebuilt daily. Streams come from your other addons.",
@@ -173,17 +175,27 @@ def meta(m: dict) -> dict:
         parts.append(f"Letterboxd {m['lb']:.1f}/5")
     if "mc" in m:
         parts.append(f"Metacritic {m['mc']}")
-    return {
+    scores = " · ".join(parts)
+    item = {
         "id": m["id"],
         "type": "movie",
         "name": m["name"],
         "poster": POSTER.format(m["id"]),
         "posterShape": "poster",
+        "logo": LOGO.format(m["id"]),
+        "background": BACKGROUND.format(m["id"]),
         "releaseInfo": m["year"],
         "imdbRating": f"{m['rating']:.1f}",
         "genres": m["genres"],
-        "description": " · ".join(parts),
+        # Plot first, like Stremio's own catalogs; the scores line stays at the end.
+        "description": f"{m['plot']}\n\n{scores}" if m.get("plot") else scores,
     }
+    if m.get("min"):
+        item["runtime"] = f"{m['min']} min"
+    if m.get("yt"):
+        # Must not also set "links": Stremio only builds the Genre/IMDb links when it's absent.
+        item["trailerStreams"] = [{"ytId": m["yt"], "title": "Trailer"}]
+    return item
 
 
 def weighted_sort(pool: list[dict], score: str, votes: str, weight: int, mean: float) -> None:
@@ -418,7 +430,8 @@ def main() -> int:
     for m in movies:
         r = cache.get(m["id"])
         if r:
-            m.update({k: v for k, v in r.items() if k in ("lb", "lbv", "mc", "mcv")})
+            m.update({k: v for k, v in r.items()
+                      if k in ("lb", "lbv", "mc", "mcv", "plot", "min", "yt")})
     log("Writing addon")
     build(movies, args.out, args.base_url)
     return 0

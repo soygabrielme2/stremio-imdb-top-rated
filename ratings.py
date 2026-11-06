@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -20,6 +21,8 @@ BATCH_SIZE = 100            # MDBList allows up to 200; 100 matches what establi
 REFRESH_DAYS = 30           # re-check a movie's ratings after this long
 MAX_REQUESTS = int(os.environ.get("MDBLIST_MAX_REQUESTS", "400"))  # free plan: 1,000/day
 CACHE_PATH = Path("ratings/mdblist.json")
+CACHE_VERSION = 2           # bump when parse_item keeps new fields; older entries get refetched
+MAX_PLOT_CHARS = 350        # plots are copied into many list files, so keep them short
 
 
 def load_cache(path: Path = CACHE_PATH) -> dict[str, dict]:
@@ -42,9 +45,39 @@ def _source(item: dict, name: str) -> dict | None:
     return None
 
 
+def short_plot(text: str | None) -> str | None:
+    """Trim to MAX_PLOT_CHARS at a sentence end if possible, else a word end."""
+    text = " ".join((text or "").split())
+    if not text:
+        return None
+    if len(text) <= MAX_PLOT_CHARS:
+        return text
+    cut = text[:MAX_PLOT_CHARS]
+    end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    if end >= MAX_PLOT_CHARS // 2:
+        return cut[:end + 1]
+    return cut[:cut.rfind(" ")].rstrip(",;:") + "…"
+
+
+def youtube_id(url: str | None) -> str | None:
+    """MDBList gives trailers as YouTube URLs; Stremio wants the bare video id."""
+    if not url:
+        return None
+    m = re.search(r"(?:v=|youtu\.be/|/embed/|/shorts/)([A-Za-z0-9_-]{11})", url)
+    return m.group(1) if m else None
+
+
 def parse_item(item: dict, today: str) -> dict:
     """Keep only what the catalogs use. Letterboxd on its 0-5 scale, Metacritic 0-100."""
-    entry: dict = {"d": today}
+    entry: dict = {"d": today, "v": CACHE_VERSION}
+    plot = short_plot(item.get("description"))
+    if plot:
+        entry["plot"] = plot
+    if isinstance(item.get("runtime"), int) and item["runtime"] > 0:
+        entry["min"] = item["runtime"]
+    trailer = youtube_id(item.get("trailer"))
+    if trailer:
+        entry["yt"] = trailer
     lb = _source(item, "letterboxd")
     if lb and (lb.get("score") is not None or lb.get("value") is not None):
         if lb.get("score") is not None:
@@ -87,12 +120,18 @@ def update(movies: list[dict], log, cache_path: Path = CACHE_PATH) -> dict[str, 
 
     today = dt.date.today()
     stale_before = (today - dt.timedelta(days=REFRESH_DAYS)).isoformat()
-    # Movies never fetched come first (most-voted first), then the oldest cached entries.
-    missing = [m for m in sorted(movies, key=lambda m: -m["votes"]) if m["id"] not in cache]
-    stale = sorted((m for m in movies if m["id"] in cache and cache[m["id"]]["d"] < stale_before),
+    # Never-fetched movies first, then entries saved by an older version of parse_item, then
+    # the oldest cached entries. Most-voted first within each group.
+    by_votes = sorted(movies, key=lambda m: -m["votes"])
+    missing = [m for m in by_votes if m["id"] not in cache]
+    outdated = [m for m in by_votes
+                if m["id"] in cache and cache[m["id"]].get("v", 1) < CACHE_VERSION]
+    stale = sorted((m for m in movies if m["id"] in cache
+                    and cache[m["id"]].get("v", 1) >= CACHE_VERSION
+                    and cache[m["id"]]["d"] < stale_before),
                    key=lambda m: cache[m["id"]]["d"])
-    queue = [m["id"] for m in missing + stale]
-    log(f"  {len(cache)} cached, {len(missing)} new, {len(stale)} stale; "
+    queue = [m["id"] for m in missing + outdated + stale]
+    log(f"  {len(cache)} cached, {len(missing)} new, {len(outdated)} outdated, {len(stale)} stale; "
         f"budget {MAX_REQUESTS} requests x {BATCH_SIZE}")
 
     requests = fetched = 0
@@ -130,7 +169,7 @@ def update(movies: list[dict], log, cache_path: Path = CACHE_PATH) -> dict[str, 
                 seen.add(imdb_id)
         for imdb_id in batch:            # unknown to MDBList: remember, retry after REFRESH_DAYS
             if imdb_id not in seen:
-                cache[imdb_id] = {"d": stamp}
+                cache[imdb_id] = {"d": stamp, "v": CACHE_VERSION}
         fetched += len(batch)
         time.sleep(0.5)
 
