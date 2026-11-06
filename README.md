@@ -6,6 +6,13 @@ Adds two rows to Stremio, ranked by **IMDb rating** using IMDb's own daily data 
 |---|---|
 | **IMDb Top Rated** | Top 1,000 movies with at least 10,000 votes |
 | **IMDb Hidden Gems** | Up to 500 movies rated 7.5+ with 5,000–25,000 votes |
+| **Letterboxd Top Rated** | Same pool as IMDb Top Rated, ranked by Letterboxd |
+| **Underrated on IMDb** | Top 20% on Letterboxd but at least 20 percentile points lower on IMDb |
+| **Critics' Darlings** | Metacritic 75+ (10+ reviews) with fewer than 100,000 IMDb votes |
+
+The last three need Letterboxd and Metacritic ratings, which come from the
+[MDBList](https://mdblist.com) API and are cached in `ratings/mdblist.json`. They only appear
+once the `MDBLIST_API_KEY` repository secret is set (see below).
 
 In Stremio's **Discover** tab, both can be filtered by **Genre** and **Year** (a single year
 like 2024, or a decade like 1990s), alone or together, e.g. History + 2024.
@@ -36,6 +43,16 @@ and only in Stremio on this PC.
 3. **Actions → Build catalog → Run workflow** (it also runs daily at 09:17 UTC).
 4. When it finishes, open `https://<your-username>.github.io/<repo>/` — it shows the exact
    manifest URL. Paste that into Stremio's addon search box on each device.
+
+## Letterboxd and Metacritic ratings (MDBList)
+
+1. Create a free account at [mdblist.com](https://mdblist.com) and copy your API key from
+   **Preferences → API**.
+2. Save it as a repository secret (it is never stored in the code):
+   `gh secret set MDBLIST_API_KEY -R <your-username>/<repo>` and paste the key when asked.
+3. Run the workflow. Each run looks up new movies and re-checks entries older than 30 days,
+   in batches of 100, and commits the updated `ratings/mdblist.json` back to the repo.
+   The free plan allows 1,000 requests a day; a run uses at most 400 (`MDBLIST_MAX_REQUESTS`).
 
 ## Notes
 

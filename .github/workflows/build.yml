@@ -6,15 +6,17 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths-ignore:
+      - "ratings/**"        # the workflow's own cache commits
 
 permissions:
-  contents: read
+  contents: write           # save the ratings cache back to the repo
   pages: write
   id-token: write
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false # never kill a run halfway through fetching ratings
 
 jobs:
   build:
@@ -26,7 +28,21 @@ jobs:
           python-version: "3.12"
       - id: pages
         uses: actions/configure-pages@v6
-      - run: python build.py --out dist --base-url "${{ steps.pages.outputs.base_url }}"
+      - name: Build catalogs
+        env:
+          MDBLIST_API_KEY: ${{ secrets.MDBLIST_API_KEY }}
+        run: python build.py --out dist --base-url "${{ steps.pages.outputs.base_url }}"
+      - name: Save ratings cache
+        run: |
+          git add ratings/
+          if git diff --cached --quiet; then
+            echo "Ratings cache unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update ratings cache"
+          git pull --rebase --autostash origin main && git push origin HEAD:main
       - uses: actions/upload-pages-artifact@v5
         with:
           path: dist

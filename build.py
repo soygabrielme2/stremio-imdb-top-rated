@@ -21,6 +21,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+import ratings
+
 DATASET_URL = "https://datasets.imdbws.com/"
 DATASETS = ("title.ratings.tsv.gz", "title.basics.tsv.gz")
 MAX_AGE_HOURS = 20          # IMDb refreshes the files daily
@@ -29,13 +31,16 @@ MIN_GENRE_ITEMS = 20        # hide genres too small to be worth a filter option
 POSTER = "https://images.metahub.space/poster/medium/{}/img"
 
 # Each catalog becomes one row on the Stremio board, filterable by genre and year in Discover.
-#   min_votes:    a movie needs this many votes to be listed at all
-#   weight_votes: how hard low-vote movies are pulled toward the average (see ranked_pool)
+#   kind:         how the catalog ranks movies (see POOLS)
+#   min_votes:    IMDb votes a movie needs to be listed at all
+#   weight_votes: how hard low-vote movies are pulled toward the average (see weighted_sort)
 #   limit:        length of the row and of genre-only lists; year-filtered lists show everything
+# Catalogs that need Letterboxd/Metacritic data are left out until enough of it is cached.
 CATALOGS = [
     {
         "id": "imdb-top-rated",
         "name": "IMDb Top Rated",
+        "kind": "imdb",
         "min_votes": 10_000,
         "max_votes": None,
         "weight_votes": 25_000,
@@ -45,20 +50,56 @@ CATALOGS = [
     {
         "id": "imdb-hidden-gems",
         "name": "IMDb Hidden Gems",
+        "kind": "imdb",
         "min_votes": 5_000,
         "max_votes": 25_000,
         "weight_votes": 5_000,
         "min_rating": 7.5,
         "limit": 500,
     },
+    {
+        # Letterboxd's film-enthusiast audience rates international, older and arthouse films
+        # more fairly than IMDb and is hard to brigade.
+        "id": "letterboxd-top-rated",
+        "name": "Letterboxd Top Rated",
+        "kind": "letterboxd",
+        "min_votes": 10_000,          # IMDb votes, so the pool matches IMDb Top Rated
+        "min_lb_votes": 1_000,
+        "weight_votes": 10_000,       # Letterboxd ratings
+        "limit": 1000,
+    },
+    {
+        # Much better liked on Letterboxd than on IMDb, relative to everything else.
+        "id": "underrated-on-imdb",
+        "name": "Underrated on IMDb",
+        "kind": "underrated",
+        "min_votes": 5_000,
+        "min_lb_votes": 1_000,
+        "weight_votes": 10_000,
+        "min_lb_percentile": 0.80,    # top 20% on Letterboxd...
+        "min_gap": 0.20,              # ...and at least 20 percentile points lower on IMDb
+        "limit": 500,
+    },
+    {
+        # Loved by professional critics, seen by relatively few IMDb users.
+        "id": "critics-darlings",
+        "name": "Critics' Darlings",
+        "kind": "critics",
+        "min_votes": 5_000,
+        "max_votes": 100_000,
+        "min_metacritic": 75,
+        "min_critics": 10,            # Metacritic reviews, so one rave can't carry a film
+        "limit": 500,
+    },
 ]
+MIN_CATALOG_ITEMS = 50       # don't publish a ratings-based row until it has this many movies
 
 MANIFEST = {
     "id": "personal.imdb.top-rated",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "name": "IMDb Top Rated",
-    "description": "Movies ranked by IMDb rating, filterable by genre and year, rebuilt daily "
-                   "from IMDb's datasets. Streams come from your other addons.",
+    "description": "Movies ranked by IMDb, Letterboxd and critics, filterable by genre and year, "
+                   "rebuilt daily. Streams come from your other addons.",
     "resources": ["catalog"],
     "types": ["movie"],
     "idPrefixes": ["tt"],
@@ -120,7 +161,16 @@ def load_movies(data_dir: Path) -> list[dict]:
     return movies
 
 
+def short_count(n: int) -> str:
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(n)
+
+
 def meta(m: dict) -> dict:
+    parts = [f"IMDb {m['rating']:.1f} ({short_count(m['votes'])} votes)"]
+    if "lb" in m:
+        parts.append(f"Letterboxd {m['lb']:.1f}/5")
+    if "mc" in m:
+        parts.append(f"Metacritic {m['mc']}")
     return {
         "id": m["id"],
         "type": "movie",
@@ -130,18 +180,22 @@ def meta(m: dict) -> dict:
         "releaseInfo": m["year"],
         "imdbRating": f"{m['rating']:.1f}",
         "genres": m["genres"],
-        "description": f"IMDb {m['rating']:.1f} from {m['votes']:,} votes",
+        "description": " · ".join(parts),
     }
 
 
-def ranked_pool(movies: list[dict], cat: dict) -> list[dict]:
-    """Movies eligible for a catalog, best first by IMDb's Top 250 style weighted rating.
+def weighted_sort(pool: list[dict], score: str, votes: str, weight: int, mean: float) -> None:
+    """Sort best first by IMDb's Top 250 style weighted rating.
 
-    weighted = (v / (v + m)) * R + (m / (v + m)) * C, where R is the movie's rating, v its votes,
-    m the catalog's weight_votes and C the mean rating. A 9.8 from 5,000 votes is pulled toward
+    weighted = (v / (v + m)) * R + (m / (v + m)) * C, where R is the movie's score, v its votes,
+    m the catalog's weight_votes and C the mean score. A 9.8 from 5,000 votes is pulled toward
     the mean much harder than a 9.3 from 3 million, which stops vote-brigaded titles from
-    topping the list. The displayed rating is still the movie's real IMDb rating.
+    topping the list. The displayed rating is still the movie's real rating.
     """
+    pool.sort(key=lambda m: -(m[votes] * m[score] + weight * mean) / (m[votes] + weight))
+
+
+def imdb_pool(movies: list[dict], cat: dict) -> list[dict]:
     in_range = [m for m in movies
                 if m["votes"] >= cat["min_votes"]
                 and (cat["max_votes"] is None or m["votes"] < cat["max_votes"])]
@@ -149,10 +203,67 @@ def ranked_pool(movies: list[dict], cat: dict) -> list[dict]:
         return []
     # Mean over every movie in the vote range, before the rating cut, so it stays a true average.
     mean = sum(m["rating"] for m in in_range) / len(in_range)
-    weight = cat["weight_votes"]
     pool = [m for m in in_range if m["rating"] >= cat["min_rating"]]
-    pool.sort(key=lambda m: -(m["votes"] * m["rating"] + weight * mean) / (m["votes"] + weight))
+    weighted_sort(pool, "rating", "votes", cat["weight_votes"], mean)
     return pool
+
+
+def letterboxd_candidates(movies: list[dict], cat: dict) -> list[dict]:
+    return [m for m in movies
+            if m["votes"] >= cat["min_votes"] and m.get("lbv", 0) >= cat["min_lb_votes"]]
+
+
+def letterboxd_pool(movies: list[dict], cat: dict) -> list[dict]:
+    pool = letterboxd_candidates(movies, cat)
+    if not pool:
+        return []
+    weighted_sort(pool, "lb", "lbv", cat["weight_votes"], sum(m["lb"] for m in pool) / len(pool))
+    return pool
+
+
+def percentiles(pool: list[dict], key: str) -> dict[str, float]:
+    """Each movie's share of the pool scoring at or below it (0 = worst, 1 = best)."""
+    ordered = sorted(pool, key=lambda m: m[key])
+    n = len(ordered)
+    out: dict[str, float] = {}
+    i = 0
+    while i < n:                       # equal scores share the same percentile
+        j = i
+        while j < n and ordered[j][key] == ordered[i][key]:
+            j += 1
+        for m in ordered[i:j]:
+            out[m["id"]] = j / n
+        i = j
+    return out
+
+
+def underrated_pool(movies: list[dict], cat: dict) -> list[dict]:
+    """Top-tier on Letterboxd but ranked much lower on IMDb, compared within the same pool.
+
+    Percentiles rather than raw scores, because the sites use different scales and audiences.
+    """
+    pool = letterboxd_candidates(movies, cat)
+    if not pool:
+        return []
+    lb_pct, imdb_pct = percentiles(pool, "lb"), percentiles(pool, "rating")
+    mean = sum(m["lb"] for m in pool) / len(pool)
+    picked = [m for m in pool
+              if lb_pct[m["id"]] >= cat["min_lb_percentile"]
+              and lb_pct[m["id"]] - imdb_pct[m["id"]] >= cat["min_gap"]]
+    weighted_sort(picked, "lb", "lbv", cat["weight_votes"], mean)
+    return picked
+
+
+def critics_pool(movies: list[dict], cat: dict) -> list[dict]:
+    pool = [m for m in movies
+            if cat["min_votes"] <= m["votes"] < cat["max_votes"]
+            and m.get("mc", 0) >= cat["min_metacritic"] and m.get("mcv", 0) >= cat["min_critics"]]
+    pool.sort(key=lambda m: (-m["mc"], -m["mcv"], -m["rating"]))
+    return pool
+
+
+POOLS = {"imdb": imdb_pool, "letterboxd": letterboxd_pool,
+         "underrated": underrated_pool, "critics": critics_pool}
 
 
 def year_matches(year: str, option: str) -> bool:
@@ -214,7 +325,10 @@ def build(movies: list[dict], out: Path, base_url: str | None) -> None:
     files = 0
 
     for cat in CATALOGS:
-        pool = ranked_pool(movies, cat)
+        pool = POOLS[cat["kind"]](movies, cat)
+        if cat["kind"] != "imdb" and len(pool) < MIN_CATALOG_ITEMS:
+            log(f"  {cat['name']}: skipped, only {len(pool)} movies have the ratings it needs")
+            continue
         limit = cat["limit"]
         row = pool[:limit]
         files += write_list(folder, cat["id"], row, {})
@@ -279,6 +393,12 @@ def main() -> int:
     log("Ranking movies")
     movies = load_movies(args.data)
     log(f"  {len(movies)} movies with enough votes")
+    log("Updating Letterboxd/Metacritic ratings")
+    cache = ratings.update(movies, log)
+    for m in movies:
+        r = cache.get(m["id"])
+        if r:
+            m.update({k: v for k, v in r.items() if k in ("lb", "lbv", "mc", "mcv")})
     log("Writing addon")
     build(movies, args.out, args.base_url)
     return 0
