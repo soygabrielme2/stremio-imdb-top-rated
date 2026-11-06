@@ -4,10 +4,15 @@ Adds two rows to Stremio, ranked by **IMDb rating** using IMDb's own daily data 
 
 | Row | What's in it |
 |---|---|
-| **IMDb Top Rated** | Top 1,000 movies by rating with at least 25,000 votes |
+| **IMDb Top Rated** | Top 1,000 movies with at least 10,000 votes |
 | **IMDb Hidden Gems** | Up to 500 movies rated 7.5+ with 5,000–25,000 votes |
 
-Both can be filtered by genre in Stremio's **Discover** tab. Clicking a movie works as usual:
+In Stremio's **Discover** tab, both can be filtered by **Genre** and **Year** (a single year
+like 2024, or a decade like 1990s), alone or together, e.g. History + 2024.
+
+Movies are ranked by a weighted rating like IMDb's own Top 250: titles with few votes are
+pulled toward the average so a 9.8 from 5,000 votes can't outrank a 9.3 from 3 million.
+The rating shown is the movie's real IMDb rating. Clicking a movie works as usual:
 Stremio shows its details page and asks your Real-Debrid addon (Torrentio, etc.) for streams.
 This addon only supplies the lists.
 

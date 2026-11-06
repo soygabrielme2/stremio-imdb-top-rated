@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import itertools
 import json
 import shutil
 import sys
@@ -27,13 +28,17 @@ PAGE_SIZE = 100             # Stremio asks for the next page with skip=<items so
 MIN_GENRE_ITEMS = 20        # hide genres too small to be worth a filter option
 POSTER = "https://images.metahub.space/poster/medium/{}/img"
 
-# Each catalog becomes one row on the Stremio board, filterable by genre in Discover.
+# Each catalog becomes one row on the Stremio board, filterable by genre and year in Discover.
+#   min_votes:    a movie needs this many votes to be listed at all
+#   weight_votes: how hard low-vote movies are pulled toward the average (see ranked_pool)
+#   limit:        length of the row and of genre-only lists; year-filtered lists show everything
 CATALOGS = [
     {
         "id": "imdb-top-rated",
         "name": "IMDb Top Rated",
-        "min_votes": 25_000,    # keeps 40-vote 9.6s off the list
+        "min_votes": 10_000,
         "max_votes": None,
+        "weight_votes": 25_000,
         "min_rating": 0.0,
         "limit": 1000,
     },
@@ -42,6 +47,7 @@ CATALOGS = [
         "name": "IMDb Hidden Gems",
         "min_votes": 5_000,
         "max_votes": 25_000,
+        "weight_votes": 5_000,
         "min_rating": 7.5,
         "limit": 500,
     },
@@ -49,10 +55,10 @@ CATALOGS = [
 
 MANIFEST = {
     "id": "personal.imdb.top-rated",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "name": "IMDb Top Rated",
-    "description": "Movies ranked by IMDb rating, rebuilt daily from IMDb's datasets. "
-                   "Streams come from your other addons.",
+    "description": "Movies ranked by IMDb rating, filterable by genre and year, rebuilt daily "
+                   "from IMDb's datasets. Streams come from your other addons.",
     "resources": ["catalog"],
     "types": ["movie"],
     "idPrefixes": ["tt"],
@@ -132,9 +138,9 @@ def ranked_pool(movies: list[dict], cat: dict) -> list[dict]:
     """Movies eligible for a catalog, best first by IMDb's Top 250 style weighted rating.
 
     weighted = (v / (v + m)) * R + (m / (v + m)) * C, where R is the movie's rating, v its votes,
-    m the catalog's vote floor and C the pool's mean rating. A 9.8 from 5,000 votes is pulled
-    toward the mean much harder than a 9.3 from 3 million, which stops vote-brigaded titles
-    from topping the list. The displayed rating is still the movie's real IMDb rating.
+    m the catalog's weight_votes and C the mean rating. A 9.8 from 5,000 votes is pulled toward
+    the mean much harder than a 9.3 from 3 million, which stops vote-brigaded titles from
+    topping the list. The displayed rating is still the movie's real IMDb rating.
     """
     in_range = [m for m in movies
                 if m["votes"] >= cat["min_votes"]
@@ -143,51 +149,59 @@ def ranked_pool(movies: list[dict], cat: dict) -> list[dict]:
         return []
     # Mean over every movie in the vote range, before the rating cut, so it stays a true average.
     mean = sum(m["rating"] for m in in_range) / len(in_range)
+    weight = cat["weight_votes"]
     pool = [m for m in in_range if m["rating"] >= cat["min_rating"]]
-    floor = cat["min_votes"]
-    pool.sort(key=lambda m: -(m["votes"] * m["rating"] + floor * mean) / (m["votes"] + floor))
+    pool.sort(key=lambda m: -(m["votes"] * m["rating"] + weight * mean) / (m["votes"] + weight))
     return pool
 
 
-def select(pool: list[dict], cat: dict, genre: str | None = None) -> list[dict]:
-    items = [m for m in pool if genre is None or genre in m["genres"]]
-    return items[:cat["limit"]]
+def year_matches(year: str, option: str) -> bool:
+    """`option` is a single year ("2024") or a decade ("2020s")."""
+    if option.endswith("s"):
+        return year[:3] == option[:3]
+    return year == option
+
+
+def year_options(pool: list[dict]) -> list[str]:
+    years = sorted({m["year"] for m in pool if m["year"]}, reverse=True)
+    decades = sorted({y[:3] + "0s" for y in years}, reverse=True)
+    return decades + years
 
 
 def write_json(path: Path, obj) -> None:
+    if sys.platform == "win32":
+        # Genre+year file names can push deep folders past Windows' 260-character path limit.
+        path = Path("\\\\?\\" + str(path.resolve()))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
 
-def write_pages(folder: Path, cat_id: str, items: list[dict], genre: str | None) -> int:
-    """Write every file name Stremio may request for this list.
+def write_list(folder: Path, cat_id: str, items: list[dict], filters: dict[str, str]) -> int:
+    """Write every file name Stremio may request for one filtered list.
 
-    Stremio requests /catalog/movie/<id>.json for the first page and
-    /catalog/movie/<id>/<extra>.json otherwise, e.g. genre=Drama&skip=100.
+    Stremio requests /catalog/movie/<id>.json for the unfiltered first page and
+    /catalog/movie/<id>/<extra>.json otherwise. Whichever filter was picked last comes first
+    (genre=X&year=Y or year=Y&genre=X), and later pages put skip in front: skip=100&genre=X.
     """
+    parts = [f"{k}={v}" for k, v in filters.items()]
+    orders = ["&".join(p) for p in itertools.permutations(parts)] if parts else [""]
+    pages = (len(items) + PAGE_SIZE - 1) // PAGE_SIZE
     count = 0
-    for start in range(0, max(len(items), 1), PAGE_SIZE):
-        page = {"metas": [meta(m) for m in items[start:start + PAGE_SIZE]]}
-        names = []
-        if genre is None:
-            names.append(f"skip={start}")
-            if start == 0:
-                write_json(folder / f"{cat_id}.json", page)
+    # One extra page past the end so a full last page is followed by an empty one, not a 404.
+    for page in range(pages + 1 if items else 1):
+        start = page * PAGE_SIZE
+        body = {"metas": [meta(m) for m in items[start:start + PAGE_SIZE]]}
+        if start == 0:
+            if parts:
+                names = orders
+            else:
+                write_json(folder / f"{cat_id}.json", body)
                 count += 1
+                continue
         else:
-            names.append(f"genre={genre}&skip={start}")
-            names.append(f"skip={start}&genre={genre}")
-            if start == 0:
-                names.append(f"genre={genre}")
-        for n in names:
-            write_json(folder / cat_id / f"{n}.json", page)
-            count += 1
-    # A skip past the end must return an empty list, not a 404.
-    end = (len(items) + PAGE_SIZE - 1) // PAGE_SIZE * PAGE_SIZE
-    tail = [f"skip={end}"] if genre is None else [f"genre={genre}&skip={end}", f"skip={end}&genre={genre}"]
-    for n in tail:
-        if not (folder / cat_id / f"{n}.json").exists():
-            write_json(folder / cat_id / f"{n}.json", {"metas": []})
+            names = [f"skip={start}" + (f"&{o}" if o else "") for o in orders]
+        for name in names:
+            write_json(folder / cat_id / f"{name}.json", body)
             count += 1
     return count
 
@@ -195,31 +209,46 @@ def write_pages(folder: Path, cat_id: str, items: list[dict], genre: str | None)
 def build(movies: list[dict], out: Path, base_url: str | None) -> None:
     tmp = out.with_name(out.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
-    catalog_dir = tmp / "catalog" / "movie"
+    folder = tmp / "catalog" / "movie"
     manifest = dict(MANIFEST, catalogs=[])
     files = 0
 
     for cat in CATALOGS:
         pool = ranked_pool(movies, cat)
-        items = select(pool, cat)
-        files += write_pages(catalog_dir, cat["id"], items, None)
+        limit = cat["limit"]
+        row = pool[:limit]
+        files += write_list(folder, cat["id"], row, {})
+
         genre_counts: dict[str, int] = {}
-        for m in items:
+        for m in pool:
             for g in m["genres"]:
                 genre_counts[g] = genre_counts.get(g, 0) + 1
         genres = sorted(g for g, n in genre_counts.items() if n >= MIN_GENRE_ITEMS)
+        years = year_options(pool)
+
+        by_genre = {g: [m for m in pool if g in m["genres"]] for g in genres}
         for g in genres:
-            # Genre lists are drawn from the whole pool, not just the top N overall.
-            files += write_pages(catalog_dir, cat["id"], select(pool, cat, g), g)
+            files += write_list(folder, cat["id"], by_genre[g][:limit], {"genre": g})
+        for y in years:
+            in_year = [m for m in pool if year_matches(m["year"], y)]
+            files += write_list(folder, cat["id"], in_year, {"year": y})
+            for g in genres:
+                both = [m for m in by_genre[g] if year_matches(m["year"], y)]
+                files += write_list(folder, cat["id"], both, {"genre": g, "year": y})
+
         manifest["catalogs"].append({
             "type": "movie",
             "id": cat["id"],
             "name": cat["name"],
-            "extra": [{"name": "genre", "options": genres}, {"name": "skip"}],
+            "extra": [
+                {"name": "genre", "options": genres},
+                {"name": "year", "options": years},
+                {"name": "skip"},
+            ],
         })
-        top = items[0] if items else None
-        log(f"  {cat['name']}: {len(items)} movies, {len(genres)} genres"
-            + (f", #1 = {top['name']} ({top['year']}) {top['rating']}" if top else ""))
+        top = row[0] if row else None
+        log(f"  {cat['name']}: {len(row)} in row, {len(pool)} total, {len(genres)} genres, "
+            f"{len(years)} year options" + (f", #1 = {top['name']} ({top['year']})" if top else ""))
 
     write_json(tmp / "manifest.json", manifest)
     (tmp / ".nojekyll").write_text("", encoding="utf-8")
