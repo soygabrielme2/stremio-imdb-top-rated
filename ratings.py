@@ -16,7 +16,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-API_URL = "https://api.mdblist.com/imdb/movie?apikey={key}"
+API_URL = "https://api.mdblist.com/imdb/{kind}?apikey={key}"
+MDBLIST_KINDS = {"movie": "movie", "series": "show"}   # Stremio type -> MDBList media type
 BATCH_SIZE = 100            # MDBList allows up to 200; 100 matches what established clients use
 REFRESH_DAYS = 30           # re-check a movie's ratings after this long
 MAX_REQUESTS = int(os.environ.get("MDBLIST_MAX_REQUESTS", "400"))  # free plan: 1,000/day
@@ -96,9 +97,10 @@ def parse_item(item: dict, today: str) -> dict:
     return entry
 
 
-def _post(key: str, ids: list[str]) -> list[dict]:
+def _post(key: str, kind: str, ids: list[str]) -> list[dict]:
     body = json.dumps({"ids": ids}).encode()
-    req = urllib.request.Request(API_URL.format(key=key), data=body, method="POST", headers={
+    url = API_URL.format(kind=MDBLIST_KINDS[kind], key=key)
+    req = urllib.request.Request(url, data=body, method="POST", headers={
         "Content-Type": "application/json", "User-Agent": "imdb-stremio-catalog"})
     with urllib.request.urlopen(req, timeout=60) as resp:
         data = json.load(resp)
@@ -130,19 +132,25 @@ def update(movies: list[dict], log, cache_path: Path = CACHE_PATH) -> dict[str, 
                     and cache[m["id"]].get("v", 1) >= CACHE_VERSION
                     and cache[m["id"]]["d"] < stale_before),
                    key=lambda m: cache[m["id"]]["d"])
-    queue = [m["id"] for m in missing + outdated + stale]
+    queue = missing + outdated + stale
     log(f"  {len(cache)} cached, {len(missing)} new, {len(outdated)} outdated, {len(stale)} stale; "
         f"budget {MAX_REQUESTS} requests x {BATCH_SIZE}")
 
+    # MDBList looks movies and shows up through different endpoints, so batch each type apart
+    # (series first: there are few of them), keeping the priority order within each type.
+    batches = []
+    for kind in ("series", "movie"):
+        ids = [m["id"] for m in queue if m.get("type", "movie") == kind]
+        batches += [(kind, ids[i:i + BATCH_SIZE]) for i in range(0, len(ids), BATCH_SIZE)]
+
     requests = fetched = 0
-    for start in range(0, len(queue), BATCH_SIZE):
+    for kind, batch in batches:
         if requests >= MAX_REQUESTS:
             log("  request budget used up; the rest will be fetched on later runs")
             break
-        batch = queue[start:start + BATCH_SIZE]
         for attempt in range(3):
             try:
-                items = _post(key, batch)
+                items = _post(key, kind, batch)
                 break
             except urllib.error.HTTPError as e:
                 if e.code == 429:
@@ -175,7 +183,7 @@ def update(movies: list[dict], log, cache_path: Path = CACHE_PATH) -> dict[str, 
 
     save_cache(cache, cache_path)
     left = getattr(_post, "remaining", "?")
-    log(f"  fetched {fetched} movies in {requests} requests ({left} requests left today); "
+    log(f"  fetched {fetched} titles in {requests} requests ({left} requests left today); "
         f"{sum(1 for v in cache.values() if 'lb' in v)} have Letterboxd, "
         f"{sum(1 for v in cache.values() if 'mc' in v)} have Metacritic")
     return cache

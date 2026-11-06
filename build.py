@@ -94,18 +94,45 @@ CATALOGS = [
         "min_critics": 10,            # Metacritic reviews, so one rave can't carry a film
         "limit": 500,
     },
+    {
+        # Documentary films get their own Home row; documentaries have fewer votes than
+        # fiction, so the floors are lower than IMDb Top Rated's.
+        "id": "top-documentaries",
+        "name": "Top Documentaries",
+        "kind": "imdb",
+        "require_genre": "Documentary",
+        "min_votes": 5_000,
+        "max_votes": None,
+        "weight_votes": 10_000,
+        "min_rating": 0.0,
+        "limit": 500,
+    },
+    {
+        "id": "top-docuseries",
+        "name": "Top Docuseries",
+        "kind": "imdb",
+        "type": "series",
+        "require_genre": "Documentary",
+        "min_votes": 5_000,
+        "max_votes": None,
+        "weight_votes": 10_000,
+        "min_rating": 0.0,
+        "limit": 500,
+    },
 ]
 MIN_CATALOG_ITEMS = 50       # don't publish a ratings-based row until it has this many movies
+TITLE_TYPES = {"movie": "movie", "tvSeries": "series", "tvMiniSeries": "series"}  # IMDb -> Stremio
+SERIES_GENRES = {"Documentary"}  # series are only loaded for these genres (see load_movies)
 BY_YEAR_SUFFIX = "-by-year"  # Discover-only twin of each catalog for Stremio's mobile apps
 
 MANIFEST = {
     "id": "personal.imdb.top-rated",
-    "version": "1.4.0",
+    "version": "1.5.0",
     "name": "IMDb Top Rated",
-    "description": "Movies ranked by IMDb, Letterboxd and critics, filterable by genre and year, "
-                   "rebuilt daily. Streams come from your other addons.",
+    "description": "Movies and docuseries ranked by IMDb, Letterboxd and critics, filterable by "
+                   "genre and year, rebuilt daily. Streams come from your other addons.",
     "resources": ["catalog"],
-    "types": ["movie"],
+    "types": ["movie", "series"],
     "idPrefixes": ["tt"],
     "behaviorHints": {"configurable": False},
 }
@@ -148,21 +175,28 @@ def load_movies(data_dir: Path) -> list[dict]:
         if v >= floor:
             ratings[tconst] = (float(rating), v)
 
-    movies = []
+    titles = []
     for r in rows(data_dir / "title.basics.tsv.gz"):
-        tconst, title_type, title, _orig, is_adult, year, _end, _runtime, genres = r[:9]
-        if title_type != "movie" or is_adult != "0" or tconst not in ratings:
+        tconst, title_type, title, _orig, is_adult, year, end, _runtime, genres = r[:9]
+        kind = TITLE_TYPES.get(title_type)
+        if kind is None or is_adult != "0" or tconst not in ratings:
+            continue
+        genre_list = [] if genres == "\\N" else genres.split(",")
+        # Only the series genres some catalog uses, so MDBList isn't asked about every TV show.
+        if kind == "series" and not SERIES_GENRES.intersection(genre_list):
             continue
         rating, votes = ratings[tconst]
-        movies.append({
+        titles.append({
             "id": tconst,
+            "type": kind,
             "name": title,
             "year": "" if year == "\\N" else year,
-            "genres": [] if genres == "\\N" else genres.split(","),
+            "end": "" if end == "\\N" else end,
+            "genres": genre_list,
             "rating": rating,
             "votes": votes,
         })
-    return movies
+    return titles
 
 
 def short_count(n: int) -> str:
@@ -176,15 +210,19 @@ def meta(m: dict) -> dict:
     if "mc" in m:
         parts.append(f"Metacritic {m['mc']}")
     scores = " · ".join(parts)
+    release = m["year"]
+    if m["type"] == "series" and m["year"]:
+        # Cinemeta style: "2006-2006" for a finished run, "2021-" while still airing.
+        release = f"{m['year']}-{m['end']}"
     item = {
         "id": m["id"],
-        "type": "movie",
+        "type": m["type"],
         "name": m["name"],
         "poster": POSTER.format(m["id"]),
         "posterShape": "poster",
         "logo": LOGO.format(m["id"]),
         "background": BACKGROUND.format(m["id"]),
-        "releaseInfo": m["year"],
+        "releaseInfo": release,
         "imdbRating": f"{m['rating']:.1f}",
         "genres": m["genres"],
         # Plot first, like Stremio's own catalogs; the scores line stays at the end.
@@ -294,10 +332,16 @@ def year_options(pool: list[dict]) -> list[str]:
     return decades + years
 
 
-def write_json(path: Path, obj) -> None:
+def long_path(path: Path) -> Path:
+    """Genre+year file names can push deep folders past Windows' 260-character path limit;
+    the \\\\?\\ prefix lifts it. A no-op elsewhere."""
     if sys.platform == "win32":
-        # Genre+year file names can push deep folders past Windows' 260-character path limit.
-        path = Path("\\\\?\\" + str(path.resolve()))
+        return Path("\\\\?\\" + str(path.resolve()))
+    return path
+
+
+def write_json(path: Path, obj) -> None:
+    path = long_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
@@ -335,17 +379,22 @@ def write_list(folder: Path, cat_id: str, items: list[dict], filters: dict[str, 
 
 def build(movies: list[dict], out: Path, base_url: str | None) -> None:
     tmp = out.with_name(out.name + ".tmp")
-    shutil.rmtree(tmp, ignore_errors=True)
-    folder = tmp / "catalog" / "movie"
+    if tmp.exists():
+        shutil.rmtree(long_path(tmp))
     manifest = dict(MANIFEST, catalogs=[])
     by_year: list[dict] = []
     files = 0
 
     for cat in CATALOGS:
-        pool = POOLS[cat["kind"]](movies, cat)
+        kind = cat.get("type", "movie")
+        required = cat.get("require_genre")
+        titles = [m for m in movies
+                  if m["type"] == kind and (required is None or required in m["genres"])]
+        pool = POOLS[cat["kind"]](titles, cat)
         if cat["kind"] != "imdb" and len(pool) < MIN_CATALOG_ITEMS:
-            log(f"  {cat['name']}: skipped, only {len(pool)} movies have the ratings it needs")
+            log(f"  {cat['name']}: skipped, only {len(pool)} titles have the ratings it needs")
             continue
+        folder = tmp / "catalog" / kind
         limit = cat["limit"]
         row = pool[:limit]
         files += write_list(folder, cat["id"], row, {})
@@ -354,7 +403,8 @@ def build(movies: list[dict], out: Path, base_url: str | None) -> None:
         for m in pool:
             for g in m["genres"]:
                 genre_counts[g] = genre_counts.get(g, 0) + 1
-        genres = sorted(g for g, n in genre_counts.items() if n >= MIN_GENRE_ITEMS)
+        # The required genre is in every title, so it would be a useless filter option.
+        genres = sorted(g for g, n in genre_counts.items() if n >= MIN_GENRE_ITEMS and g != required)
         years = year_options(pool)
 
         by_genre = {g: [m for m in pool if g in m["genres"]] for g in genres}
@@ -370,7 +420,7 @@ def build(movies: list[dict], out: Path, base_url: str | None) -> None:
                 files += write_list(folder, cat["id"], both, {"genre": g, "year": y})
 
         manifest["catalogs"].append({
-            "type": "movie",
+            "type": kind,
             "id": cat["id"],
             "name": cat["name"],
             "extra": [
@@ -383,7 +433,7 @@ def build(movies: list[dict], out: Path, base_url: str | None) -> None:
         # catalog gets a Discover-only twin whose "genre" dropdown lists years and decades,
         # like Cinemeta's own by-year catalog. isRequired keeps it off the Home board.
         by_year.append({
-            "type": "movie",
+            "type": kind,
             "id": cat["id"] + BY_YEAR_SUFFIX,
             "name": f"{cat['name']} · by Year",
             "extra": [
@@ -407,8 +457,9 @@ def build(movies: list[dict], out: Path, base_url: str | None) -> None:
         f"<p>Built {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}.</p>",
         encoding="utf-8")
 
-    shutil.rmtree(out, ignore_errors=True)
-    tmp.replace(out)
+    if out.exists():
+        shutil.rmtree(long_path(out))    # fail loudly rather than leave stale files behind
+    long_path(tmp).replace(long_path(out))
     log(f"  wrote {files} catalog files to {out}")
 
 

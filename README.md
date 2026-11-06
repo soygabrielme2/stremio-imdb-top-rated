@@ -9,6 +9,8 @@ Adds two rows to Stremio, ranked by **IMDb rating** using IMDb's own daily data 
 | **Letterboxd Top Rated** | Same pool as IMDb Top Rated, ranked by Letterboxd |
 | **Underrated on IMDb** | Top 20% on Letterboxd but at least 20 percentile points lower on IMDb |
 | **Critics' Darlings** | Metacritic 75+ (10+ reviews) with fewer than 100,000 IMDb votes |
+| **Top Documentaries** | Documentary films with 5,000+ IMDb votes |
+| **Top Docuseries** (Series) | Documentary series and miniseries with 5,000+ IMDb votes |
 
 The last three need Letterboxd and Metacritic ratings, which come from the
 [MDBList](https://mdblist.com) API and are cached in `ratings/mdblist.json`. They only appear
