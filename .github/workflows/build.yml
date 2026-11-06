@@ -34,6 +34,10 @@ jobs:
         run: python build.py --out dist --base-url "${{ steps.pages.outputs.base_url }}"
       - name: Save ratings cache
         run: |
+          if [ ! -d ratings ]; then
+            echo "No ratings cache yet (MDBLIST_API_KEY not set?)"
+            exit 0
+          fi
           git add ratings/
           if git diff --cached --quiet; then
             echo "Ratings cache unchanged"

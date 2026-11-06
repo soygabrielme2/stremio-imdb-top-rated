@@ -78,6 +78,7 @@ CATALOGS = [
         "weight_votes": 10_000,
         "min_lb_percentile": 0.80,    # top 20% on Letterboxd...
         "min_gap": 0.20,              # ...and at least 20 percentile points lower on IMDb
+        "min_imdb_rating": 6.0,       # keeps out fan-brigaded Letterboxd scores (e.g. concert films)
         "limit": 500,
     },
     {
@@ -249,7 +250,8 @@ def underrated_pool(movies: list[dict], cat: dict) -> list[dict]:
     mean = sum(m["lb"] for m in pool) / len(pool)
     picked = [m for m in pool
               if lb_pct[m["id"]] >= cat["min_lb_percentile"]
-              and lb_pct[m["id"]] - imdb_pct[m["id"]] >= cat["min_gap"]]
+              and lb_pct[m["id"]] - imdb_pct[m["id"]] >= cat["min_gap"]
+              and m["rating"] >= cat["min_imdb_rating"]]
     weighted_sort(picked, "lb", "lbv", cat["weight_votes"], mean)
     return picked
 
