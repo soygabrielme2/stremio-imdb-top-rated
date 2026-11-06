@@ -60,3 +60,5 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v5
+        with:
+          timeout: 1800000    # ms; ~40k small catalog files can take over the default 10 min

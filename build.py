@@ -295,14 +295,15 @@ def write_list(folder: Path, cat_id: str, items: list[dict], filters: dict[str, 
     Stremio requests /catalog/movie/<id>.json for the unfiltered first page and
     /catalog/movie/<id>/<extra>.json otherwise. Whichever filter was picked last comes first
     (genre=X&year=Y or year=Y&genre=X), and later pages put skip in front: skip=100&genre=X.
+    Stremio keeps asking for more until it gets an empty page, using skip=<movies loaded so
+    far>, so a 17-movie list is followed by a request for skip=17. That final empty page is
+    written too, so the list ends cleanly instead of with a 404.
     """
     parts = [f"{k}={v}" for k, v in filters.items()]
     orders = ["&".join(p) for p in itertools.permutations(parts)] if parts else [""]
-    pages = (len(items) + PAGE_SIZE - 1) // PAGE_SIZE
+    starts = list(range(0, len(items), PAGE_SIZE)) + [len(items)] if items else [0]
     count = 0
-    # One extra page past the end so a full last page is followed by an empty one, not a 404.
-    for page in range(pages + 1 if items else 1):
-        start = page * PAGE_SIZE
+    for start in starts:
         body = {"metas": [meta(m) for m in items[start:start + PAGE_SIZE]]}
         if start == 0:
             if parts:
