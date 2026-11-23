@@ -11,6 +11,12 @@ Adds two rows to Stremio, ranked by **IMDb rating** using IMDb's own daily data 
 | **Critics' Darlings** | Metacritic 75+ (10+ reviews) with fewer than 100,000 IMDb votes |
 | **Top Documentaries** | Documentary films with 5,000+ IMDb votes |
 | **Top Docuseries** (Series) | Documentary series and miniseries with 5,000+ IMDb votes |
+| **Top Heist Movies** | Heist films (5,000+ votes) and heist documentaries (1,000+ votes) |
+| **Top Heist Series** (Series) | Heist shows like *Money Heist* and heist docuseries |
+
+IMDb has no heist genre, so `heist.py` picks heist titles from [Wikidata](https://www.wikidata.org)
+("heist film" genre, or a robbery as main subject; no key needed) plus any title whose name or
+plot mentions a heist. For documentaries, plots that mention a robbery count too.
 
 The last three need Letterboxd and Metacritic ratings, which come from the
 [MDBList](https://mdblist.com) API and are cached in `ratings/mdblist.json`. They only appear

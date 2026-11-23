@@ -21,6 +21,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+import heist
 import ratings
 
 DATASET_URL = "https://datasets.imdbws.com/"
@@ -119,17 +120,47 @@ CATALOGS = [
         "min_rating": 0.0,
         "limit": 500,
     },
+    {
+        # Heist films and heist documentaries (see heist.py for how titles are picked).
+        # min_votes is 1,000 so documentaries get in; fiction still needs MIN_VOTES.
+        "id": "top-heist-movies",
+        "name": "Top Heist Movies",
+        "kind": "imdb",
+        "require_tag": "heist",
+        "min_votes": 1_000,
+        "max_votes": None,
+        "weight_votes": 10_000,
+        "min_rating": 0.0,
+        "min_genre_items": 5,         # small pool, so smaller genres (Documentary) still show
+        "limit": 500,
+    },
+    {
+        "id": "top-heist-series",
+        "name": "Top Heist Series",
+        "kind": "imdb",
+        "type": "series",
+        "require_tag": "heist",
+        "min_votes": 1_000,
+        "max_votes": None,
+        "weight_votes": 10_000,
+        "min_rating": 0.0,
+        "min_genre_items": 3,
+        "limit": 500,
+    },
 ]
 MIN_CATALOG_ITEMS = 50       # don't publish a ratings-based row until it has this many movies
+MIN_VOTES = 5_000            # titles with fewer IMDb votes aren't loaded at all...
+DOC_MIN_VOTES = 1_000        # ...except documentaries, whose audiences are much smaller
 TITLE_TYPES = {"movie": "movie", "tvSeries": "series", "tvMiniSeries": "series"}  # IMDb -> Stremio
-SERIES_GENRES = {"Documentary"}  # series are only loaded for these genres (see load_movies)
+# Series are only loaded for these genres (see load_movies). Crime is for the heist series row.
+SERIES_GENRES = {"Documentary", "Crime"}
 BY_YEAR_SUFFIX = "-by-year"  # Discover-only twin of each catalog for Stremio's mobile apps
 
 MANIFEST = {
     "id": "personal.imdb.top-rated",
-    "version": "1.5.0",
+    "version": "1.6.0",
     "name": "IMDb Top Rated",
-    "description": "Movies and docuseries ranked by IMDb, Letterboxd and critics, filterable by "
+    "description": "Movies, docuseries and heists ranked by IMDb, Letterboxd and critics, filterable by "
                    "genre and year, rebuilt daily. Streams come from your other addons.",
     "resources": ["catalog"],
     "types": ["movie", "series"],
@@ -168,7 +199,7 @@ def rows(path: Path):
 
 
 def load_movies(data_dir: Path) -> list[dict]:
-    floor = min(c["min_votes"] for c in CATALOGS)
+    floor = min(MIN_VOTES, DOC_MIN_VOTES)
     ratings: dict[str, tuple[float, int]] = {}
     for tconst, rating, votes in rows(data_dir / "title.ratings.tsv.gz"):
         v = int(votes)
@@ -186,6 +217,8 @@ def load_movies(data_dir: Path) -> list[dict]:
         if kind == "series" and not SERIES_GENRES.intersection(genre_list):
             continue
         rating, votes = ratings[tconst]
+        if votes < MIN_VOTES and "Documentary" not in genre_list:
+            continue
         titles.append({
             "id": tconst,
             "type": kind,
@@ -389,8 +422,10 @@ def build(movies: list[dict], out: Path, base_url: str | None) -> None:
     for cat in CATALOGS:
         kind = cat.get("type", "movie")
         required = cat.get("require_genre")
+        tag = cat.get("require_tag")
         titles = [m for m in movies
-                  if m["type"] == kind and (required is None or required in m["genres"])]
+                  if m["type"] == kind and (required is None or required in m["genres"])
+                  and (tag is None or tag in m.get("tags", ()))]
         pool = POOLS[cat["kind"]](titles, cat)
         if cat["kind"] != "imdb" and len(pool) < MIN_CATALOG_ITEMS:
             log(f"  {cat['name']}: skipped, only {len(pool)} titles have the ratings it needs")
@@ -405,7 +440,8 @@ def build(movies: list[dict], out: Path, base_url: str | None) -> None:
             for g in m["genres"]:
                 genre_counts[g] = genre_counts.get(g, 0) + 1
         # The required genre is in every title, so it would be a useless filter option.
-        genres = sorted(g for g, n in genre_counts.items() if n >= MIN_GENRE_ITEMS and g != required)
+        min_items = cat.get("min_genre_items", MIN_GENRE_ITEMS)
+        genres = sorted(g for g, n in genre_counts.items() if n >= min_items and g != required)
         years = year_options(pool)
 
         by_genre = {g: [m for m in pool if g in m["genres"]] for g in genres}
@@ -484,6 +520,8 @@ def main() -> int:
         if r:
             m.update({k: v for k, v in r.items()
                       if k in ("lb", "lbv", "mc", "mcv", "plot", "min", "yt")})
+    log("Finding heist titles")
+    heist.tag(movies, log)
     log("Writing addon")
     build(movies, args.out, args.base_url)
     return 0
